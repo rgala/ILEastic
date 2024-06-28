@@ -83,10 +83,11 @@ clean:
 test: .PHONY
 	cd unittests && make
 
-plugins: .PHONY
-	cd plugins/cors && make all
-	cd plugins/authsystem && make all
-	cd plugins/basicauth && make all
+PLUGINS = cors authsystem basicauth
+$(PLUGINS): .PHONY
+	cd plugins/$@ && $(MAKE) all
+
+plugins: $(PLUGINS)
 
 # For vsCode 
 current: env
@@ -97,8 +98,14 @@ current: env
 install:
 	-mkdir $(USRINCDIR)/ILEastic
 	cp headers/ileastic.rpgle $(USRINCDIR)/ILEastic/
-	cp plugins/basicauth/basicauth_h.rpgle $(USRINCDIR)/ILEastic/
-	cp plugins/cors/cors_h.rpginc $(USRINCDIR)/ILEastic/
+	$(eval cwd := $(shell pwd))
+	set -e; \
+	for plugin in $(PLUGINS); \
+	do \
+		cd plugins/$$plugin; \
+		$(MAKE) $@ SHELL=$(SHELL); \
+		cd $(cwd); \
+	done
 
 .PHONY:
 
