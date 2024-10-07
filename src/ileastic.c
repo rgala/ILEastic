@@ -1,4 +1,4 @@
-/* ------------------------------------------------------------- */
+﻿/* ------------------------------------------------------------- */
 /* Program . . . : ILEastic - main interface                     */
 /* Date  . . . . : 02.06.2018                                    */
 /* Design  . . . : Niels Liisberg                                */
@@ -743,7 +743,10 @@ static void * serverThread (PINSTANCE pInstance)
     BOOL     connected = true; 
     UCHAR    temp [256]; 
     
-    pthread_detach(pthread_self());
+    if(! pInstance->config.isWorker) 
+    {
+        pthread_detach(pthread_self());
+    }   
 
 
     while (pInstance->config.clientSocket > 0 && connected) {
@@ -794,8 +797,11 @@ static void * serverThread (PINSTANCE pInstance)
         cleanupTransaction (&request , &response);
     }
     close(response.pConfig->clientSocket);
+    if(! pInstance->config.isWorker) 
+    {
+        pthread_exit(NULL);
+    }
     memFree(&pInstance);
-    pthread_exit(NULL);
     return NULL;
 }
 /* --------------------------------------------------------------------------- */
@@ -1013,6 +1019,10 @@ static void loadConfigFromEnvironment (PCONFIG pConfig)
         str2vc (&pConfig->certificatePassword , pEnvVal );
     } 
 
+    pEnvVal = getenv("IL_ISWORKER");
+    if (pEnvVal) {
+        pConfig->isWorker = true;
+    } 
 }
 /* ------------------------------------------------------------- */
 void il_listen (PCONFIG pConfig, SERVLET servlet)
@@ -1022,6 +1032,12 @@ void il_listen (PCONFIG pConfig, SERVLET servlet)
     pthread_attr_t attr;
     pthread_t  pSchedulerThread;
     int rc;
+    int pipe_fdmap[2];
+    int spawn_fdmap[2];
+    char *spawn_argv[1];
+    char *spawn_envp[2];
+    struct inheritance inherit;
+    VARCHAR256 pWorkerProgram;    
 
     loadConfigFromEnvironment ( pConfig);
 
@@ -1045,6 +1061,11 @@ void il_listen (PCONFIG pConfig, SERVLET servlet)
 
     setCallbacks (pConfig);
 
+    rc = pipe(pipe_fdmap);
+    if (rc == -1) {
+        perror("error in pipe");
+        exit(3);
+    }
 
     // tInitSSL(pConfig);
 
@@ -1058,13 +1079,17 @@ void il_listen (PCONFIG pConfig, SERVLET servlet)
         int clientSize;
         int errcde;
 
+        if(pConfig->isWorker == 0x40) pConfig->isWorker = false;
+
         // Initialize connection
-        if (resetSocket) {
-            if ( ! getSocket(pConfig) ) {
-                sleep(5);
-                continue;
+        if(!pConfig->isWorker) {
+            if (resetSocket) {
+                if ( ! getSocket(pConfig) ) {
+                    sleep(5);
+                    continue;
+                }
+                resetSocket = false;
             }
-            resetSocket = false;
         }
 
         if (pConfig->protocol == PROT_FASTCGI
@@ -1081,14 +1106,22 @@ void il_listen (PCONFIG pConfig, SERVLET servlet)
 
         // accept() the incoming connection request.
         clientSize = sizeof(client);
-        clientSocket = accept(pConfig->mainSocket,  (struct sockaddr *)   &client, &clientSize);
-
-        if (clientSocket < 0 ) {
-            errcde = montcp(errno);
-            resetSocket = TRUE;
-            close(pConfig->mainSocket);
-            il_joblog( "Accept error: %d - %s" ,(int) errcde, strerror((int) errcde));
-            continue;
+        if(!pConfig->isWorker) {
+            clientSocket = accept(pConfig->mainSocket,  (struct sockaddr *)   &client, &clientSize);
+            if (clientSocket < 0 ) {
+                errcde = montcp(errno);
+                resetSocket = TRUE;
+                close(pConfig->mainSocket);
+                il_joblog( "Accept error: %d - %s" ,(int) errcde, strerror((int) errcde));
+                continue;
+            }
+        } else {
+            clientSocket = 1;
+            errcde = read(0, &client, sizeof(client));
+            if (rc == -1) {
+                il_joblog( "Read error: %d - %s" ,(int) errcde, strerror((int) errcde));
+                return;
+            }
         }
 
         // virker ikke:    sprintf(RemoteIp   , "%s" , inet_ntoa(client.sin_addr));
@@ -1102,13 +1135,41 @@ void il_listen (PCONFIG pConfig, SERVLET servlet)
         pInstance->config.clientSocket   = clientSocket;
         pInstance->servlet = pParms->OpDescList->NbrOfParms >= 2 ? servlet : NULL;
 
-        rc = pthread_create(&pServerThread , &attr, serverThread , pInstance);
-        if (rc) {
-            errcde = rc;
-            il_joblog( "Thread not started - ensure ALWMLTTHD(*YES) on job: %d - %s" , (int) errcde, strerror((int) errcde));
-            exit(0);
+        if(pConfig->isWorker) {
+            serverThread(pInstance);
+            return;
         }
 
+        switch (pConfig->threadingMode) {
+            case TM_DEFAULT:
+            case TM_THREAD:
+                rc = pthread_create(&pServerThread , &attr, serverThread , pInstance);
+                if (rc) {
+                    errcde = rc;
+                    il_joblog( "Thread not started - ensure ALWMLTTHD(*YES) on job: %d - %s" , (int) errcde, strerror((int) errcde));
+                    exit(0);
+                }    
+                break;
+            case TM_JOB:
+                rc = write(pipe_fdmap[1], &client, sizeof(client));
+                spawn_argv[0]  = NULL;
+                spawn_envp[0]  = "IL_ISWORKER=true";
+                spawn_envp[1]  = NULL;
+                spawn_fdmap[0] = pipe_fdmap[0];
+                spawn_fdmap[1] = clientSocket;
+                memset(&inherit, 0, sizeof(inherit));
+                inherit.flags = SPAWN_SETPJ_NP + SPAWN_SETTHREAD_NP;
+                rc = spawn(vc2str(&pConfig->workerProgram), 2, spawn_fdmap, &inherit, spawn_argv, spawn_envp);
+                if (rc == -1) {
+                    il_joblog( "Spawn error: %d - %s" , (int) errno, strerror((int) errno));
+                    exit(0);
+                }   
+                close(clientSocket);
+                break;
+            default:
+                il_joblog ("Invalid threading mode %d" , pConfig->threadingMode);
+                exit(-1);
+        }
     }
 }
 
