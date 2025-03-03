@@ -72,11 +72,12 @@ end-pr;
 dcl-proc test_parseSimpleRequest export;
   dcl-s httpMessage varchar(1000) ccsid(819);
   
-  httpMessage = 'GET /index.html HTTP/1.1' + CRLF + 'Host: localhost' + CRLF + CRLF;
+  httpMessage = 'GET /index.html HTTP/1.1' + CRLF + 'Host: localhost' + CRLF + 'Content-Type: application/json' + CRLF + CRLF;
   lookForHeaders(%addr(request) : %addr(httpMessage : *data) : %len(httpMessage));
   
   aEqual(utf8('GET') : il_getRequestMethod(request));
   aEqual(utf8('localhost') : il_getRequestHeader(request : 'Host'));
+  aEqual('application/json' : request.contentType);
   aEqual(utf8('/index.html') : il_getRequestResource(request));
 end-proc;
 

@@ -481,6 +481,9 @@ BOOL lookForHeaders ( PREQUEST pRequest, PUCHAR buf , ULONG bufLen)
 
 
     pRequest->contentLength = a2i(getHeaderValue (temp , pRequest->headerList, "content-length"));
+    getHeaderValue (temp , pRequest->headerList, "content-type");
+    stra2e(temp, temp);
+    str2vc(&pRequest->contentType, temp);
 
     // Only what is recived so far - the rest is returned in "receivePayload"
     if (pRequest->contentLength > 0) {
